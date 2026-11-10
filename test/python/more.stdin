@@ -1,0 +1,42 @@
+def gen(n):
+    for i in range(n):
+        yield i * 3
+
+list(gen(5))
+words = "the quick brown fox jumps over the lazy dog".split()
+counts = {}
+for w in words:
+    counts[w] = counts.get(w, 0) + 1
+
+sorted(counts.items())
+squares = {x: x * x for x in range(6) if x % 2}
+squares
+f"{3.14159:.2f} {255:#x} {'hi':>5}"
+s = set([3, 1, 2, 3, 1])
+s, 2 in s, len(s)
+lambda_add = lambda a, b: a + b
+lambda_add(2, 40)
+import gc
+gc.collect()
+[1, 2, 3][::-1] + list(map(str, range(3)))
+x = 10
+while x > 0:
+    x -= 3
+
+x
+int("ff", 16), hex(1 << 70), divmod(-7, 2), 7 // -2, -7 % 3
+str(1e300 * 10), 0.1 + 0.2, round(2.675, 2), 3 / 4
+class Vec:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+    def __add__(self, o):
+        return Vec(self.x + o.x, self.y + o.y)
+    def __repr__(self):
+        return "Vec(%d, %d)" % (self.x, self.y)
+
+Vec(1, 2) + Vec(3, 4)
+undefined_name
+name = input("Your name? ")
+Ada
+"Hello, " + name.upper() + "!"
+exit()

@@ -4,15 +4,19 @@ import { fold } from './ast.js';
 
 const ID_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
+// Short unique ids. The first character is always a letter so that no id
+// looks like an array index (JavaScript orders integer-like keys first, and
+// block order matters, see sb3.js).
 export function makeIdGen(prefix = '') {
   let n = 0;
   return () => {
     let x = n++;
-    let s = '';
-    do {
-      s = ID_CHARS[x % ID_CHARS.length] + s;
+    let s = ID_CHARS[x % 52];
+    x = Math.floor(x / 52);
+    while (x > 0) {
+      s += ID_CHARS[x % ID_CHARS.length];
       x = Math.floor(x / ID_CHARS.length);
-    } while (x > 0);
+    }
     return prefix + s;
   };
 }

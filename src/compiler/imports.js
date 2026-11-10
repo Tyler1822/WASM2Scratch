@@ -107,15 +107,24 @@ const SCRATCH = {
     cx.emit(A.stmt('pen_setPenColorToColor', { COLOR: { shadow: 9, expr: a[0].e } }));
     return [];
   } },
+  pen_hue: { sig: 'f64->', fn: (cx, a) => {
+    cx.ctx.uses.pen = true;
+    cx.emit(A.stmt('pen_setPenColorParamTo', {
+      COLOR_PARAM: { menu: 'pen_menu_colorParam', field: 'colorParam', value: 'color' },
+      VALUE: a[0].e,
+    }));
+    return [];
+  } },
   pen_size: { sig: 'f64->', fn: (cx, a) => { cx.ctx.uses.pen = true; cx.emit(A.stmt('pen_setPenSizeTo', { SIZE: a[0].e })); return []; } },
   goto_xy: { sig: 'f64,f64->', fn: (cx, a) => { cx.emit(A.stmt('motion_gotoxy', { X: a[0].e, Y: a[1].e })); return []; } },
   say: { sig: 'i32->', fn: (cx, a) => {
+    cx.ctx.uses.say = true;
     cx.emit(A.call(cx.ctx.rt.use('cstr'), a[0].e));
     cx.emit(A.stmt('looks_say', { MESSAGE: v('r') }));
     return [];
   } },
-  say_int: { sig: 'i32->', fn: (cx, a) => { cx.emit(A.stmt('looks_say', { MESSAGE: signed32(a[0].e) })); return []; } },
-  say_num: { sig: 'f64->', fn: (cx, a) => { cx.emit(A.stmt('looks_say', { MESSAGE: a[0].e })); return []; } },
+  say_int: { sig: 'i32->', fn: (cx, a) => { cx.ctx.uses.say = true; cx.emit(A.stmt('looks_say', { MESSAGE: signed32(a[0].e) })); return []; } },
+  say_num: { sig: 'f64->', fn: (cx, a) => { cx.ctx.uses.say = true; cx.emit(A.stmt('looks_say', { MESSAGE: a[0].e })); return []; } },
   wait: { sig: 'f64->', fn: (cx, a) => { cx.emit(A.stmt('control_wait', { DURATION: a[0].e })); return []; } },
   mouse_x: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.reporter('sensing_mousex') }] },
   mouse_y: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.reporter('sensing_mousey') }] },
@@ -125,7 +134,22 @@ const SCRATCH = {
     return [{ ty: 'i32', e: A.reporter('sensing_keypressed', keyOf(A.mod(a[0].e, 128)), {}, true) }];
   } },
   timer: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.reporter('sensing_timer') }] },
+  // Wall-clock seconds. Unlike the Scratch timer (which only advances between
+  // frames), this keeps moving while a script runs.
+  clock: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.mul(A.reporter('sensing_dayssince2000'), 86400) }] },
   reset_timer: { sig: '->', fn: (cx) => { cx.emit(A.stmt('sensing_resettimer')); return []; } },
+  // GC support: gc_roots_begin() snapshots every Scratch variable that can
+  // hold a wasm value (locals, stack slots, globals, saved call frames) and
+  // returns how many there are; gc_roots_copy(buf, start, count) writes a
+  // range of them into linear memory as u32 words for a conservative scan.
+  gc_roots_begin: { sig: '->i32', fn: (cx) => {
+    cx.emit(A.call(cx.ctx.gcRootsProc()));
+    return [{ ty: 'i32', e: cx.setTmp(A.listLen('gcroots')) }];
+  } },
+  gc_roots_copy: { sig: 'i32,i32,i32->i32', fn: (cx, a) => {
+    cx.emit(A.call(cx.ctx.rt.use('gcroots_copy'), a[0].e, a[1].e, a[2].e));
+    return [{ ty: 'i32', e: cx.setTmp(v('r')) }];
+  } },
   random_int: { sig: 'i32,i32->i32', fn: (cx, a) => [{ ty: 'i32', e: A.mod(A.random(signed32(a[0].e), signed32(a[1].e)), U) }] },
 };
 

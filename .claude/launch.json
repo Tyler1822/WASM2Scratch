@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sb3-server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve.js", "python/build", "8765"],
+      "port": 8765
+    }
+  ]
+}

@@ -93,15 +93,16 @@ function readBlockType(r) {
   return r.s32(); // type index (s33, but indices fit comfortably)
 }
 
-// Reads instructions until `end` (or `else`, when allowElse). Returns the
-// terminator that stopped the sequence.
-function readInstrs(r, out, allowElse) {
+// Reads instructions until a terminator (`end`, or one of `extra`, e.g. `else`
+// inside `if` or `catch`/`delegate` inside `try`). Returns {term, imm}.
+function readInstrs(r, out, extra = null) {
   for (;;) {
     const code = r.u8();
-    if (code === 0x0b) return 'end';
-    if (code === 0x05) {
-      if (!allowElse) throw new Error('unexpected else');
-      return 'else';
+    if (code === 0x0b) return { term: 'end' };
+    if (code === 0x05 || code === 0x07 || code === 0x18 || code === 0x19) {
+      const term = OPCODES[code][0];
+      if (!extra || !extra.includes(term)) throw new Error(`unexpected ${term}`);
+      return { term, imm: code === 0x07 || code === 0x18 ? r.u32() : undefined };
     }
     let entry;
     if (code === 0xfc) {
@@ -125,17 +126,36 @@ function readInstrs(r, out, allowElse) {
         if (op === 'if') {
           ins.then = [];
           ins.else = null;
-          if (readInstrs(r, ins.then, true) === 'else') {
+          if (readInstrs(r, ins.then, ['else']).term === 'else') {
             ins.else = [];
-            readInstrs(r, ins.else, false);
+            readInstrs(r, ins.else);
+          }
+        } else if (op === 'try') {
+          // try <body> (catch tag <body>)* (catch_all <body>)? end  |  try <body> delegate L
+          ins.body = [];
+          ins.catches = [];
+          ins.catchAll = null;
+          ins.delegate = null;
+          let t = readInstrs(r, ins.body, ['catch', 'catch_all', 'delegate']);
+          while (t.term === 'catch') {
+            const c = { tag: t.imm, body: [] };
+            ins.catches.push(c);
+            t = readInstrs(r, c.body, ['catch', 'catch_all']);
+          }
+          if (t.term === 'catch_all') {
+            ins.catchAll = [];
+            readInstrs(r, ins.catchAll);
+          } else if (t.term === 'delegate') {
+            ins.delegate = t.imm;
           }
         } else {
           ins.body = [];
-          readInstrs(r, ins.body, false);
+          readInstrs(r, ins.body);
         }
         break;
       }
       case 'label': ins.depth = r.u32(); break;
+      case 'tag': ins.tag = r.u32(); break;
       case 'table': ins.targets = r.vec(() => r.u32()); ins.default = r.u32(); break;
       case 'func': ins.func = r.u32(); break;
       case 'calli': ins.type = r.u32(); ins.table = r.u32(); break;
@@ -164,7 +184,7 @@ function readInstrs(r, out, allowElse) {
 
 function readConstExpr(r) {
   const out = [];
-  readInstrs(r, out, false);
+  readInstrs(r, out);
   return out;
 }
 
@@ -177,7 +197,7 @@ export function parseWasm(bytes) {
 
   const mod = {
     types: [], imports: [], funcs: [], tables: [], memories: [], globals: [],
-    exports: [], start: null, elems: [], datas: [],
+    exports: [], start: null, elems: [], datas: [], tags: [],
     names: { module: null, funcs: new Map(), locals: new Map(), globals: new Map() },
     numImportedFuncs: 0, numImportedGlobals: 0,
   };
@@ -222,6 +242,11 @@ export function parseWasm(bytes) {
             mod.imports.push({ module, name, kind: 'global' });
             mod.globals.push({ type, mutable, init: null, import: { module, name } });
             mod.numImportedGlobals++;
+          } else if (kind === 4) {
+            s.u8();
+            const typeIdx = s.u32();
+            mod.imports.push({ module, name, kind: 'tag' });
+            mod.tags.push({ typeIdx, type: mod.types[typeIdx], import: { module, name } });
           } else {
             throw new Error(`unsupported import kind ${kind}`);
           }
@@ -266,7 +291,7 @@ export function parseWasm(bytes) {
             for (let k = 0; k < n; k++) locals.push(t);
           });
           const body = [];
-          readInstrs(b, body, false);
+          readInstrs(b, body);
           const typeIdx = funcTypeIdx[i++];
           mod.funcs.push({ index: mod.funcs.length, typeIdx, type: mod.types[typeIdx], import: null, locals, body });
         });
@@ -285,6 +310,9 @@ export function parseWasm(bytes) {
         });
         break;
       case 12: // data count
+        break;
+      case 13: // tags (exception handling)
+        s.vec(() => { s.u8(); const typeIdx = s.u32(); mod.tags.push({ typeIdx, type: mod.types[typeIdx], import: null }); });
         break;
       default:
         break; // unknown sections (e.g. tag section) are ignored

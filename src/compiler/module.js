@@ -4,7 +4,7 @@ import * as A from '../scratch/ast.js';
 import { parseWasm, evalConstExpr } from '../wasm/parser.js';
 import { buildProject } from '../scratch/sb3.js';
 import { analyzeCallGraph, sigKey } from './analysis.js';
-import { FuncCompiler } from './function.js';
+import { FuncCompiler, restoreStmts } from './function.js';
 import { Runtime, TABLES, LIST_LIMIT } from './runtime.js';
 import { Imports, keyTable } from './imports.js';
 
@@ -22,11 +22,14 @@ class Context {
     this.mod = mod;
     this.opts = opts;
     this.warnings = [];
-    this.uses = { stdout: false, stdin: false, pen: false, keys: false };
+    this.uses = { stdout: false, stdin: false, pen: false, keys: false, say: false, gcroots: false };
+    // Must be known before any function is compiled (see FuncCompiler.paramIsArg).
+    this.uses.gcroots = mod.imports.some((im) => im.kind === 'func' && im.name === 'gc_roots_begin');
     this.cg = analyzeCallGraph(mod);
     this.rt = new Runtime(this);
     this.imports = new Imports(this);
     this.dispatchers = new Map();
+    this.frames = new Map();
     this.extraProcs = [];
 
     // Procedure / variable names.
@@ -66,6 +69,30 @@ class Context {
   }
 
   warn(msg) { this.warnings.push(msg); }
+
+  // The procedure that fills the list `gcroots`; its body is generated after
+  // all code is compiled, when every variable name is known.
+  gcRootsProc() {
+    if (!this.gcRoots) {
+      this.gcRoots = { name: 'collect gc roots', args: [], warp: true, body: [] };
+      this.extraProcs.push(this.gcRoots);
+    }
+    return this.gcRoots.name;
+  }
+
+  // Shared procedures that push / pop a set of variables on the call stack.
+  frameProcs(names) {
+    const key = names.join('\u0000');
+    let f = this.frames.get(key);
+    if (!f) {
+      const n = this.frames.size;
+      f = { save: `save frame ${n}`, restore: `restore frame ${n}` };
+      this.frames.set(key, f);
+      this.extraProcs.push({ name: f.save, args: [], warp: true, body: names.map((x) => A.ladd('cs', v(x))) });
+      this.extraProcs.push({ name: f.restore, args: [], warp: true, body: restoreStmts(names) });
+    }
+    return f;
+  }
   procName(i) { return this.names[i]; }
   varPrefix(i) { return this.names[i]; }
   globalVar(i) { return this.gnames[i]; }
@@ -133,6 +160,22 @@ function walkStmts(stmts, fn) {
     if (s.body) walkStmts(s.body, fn);
     if (s.substacks) s.substacks.forEach((ss) => walkStmts(ss, fn));
   }
+}
+
+function varsUsed(procs) {
+  const used = new Set();
+  const expr = (e) => A.walkExpr(e, (n) => {
+    if (n.t === 'v') used.add(n.name);
+    if (n.t === 'blk') for (const k in n.inputs) { const x = n.inputs[k]; if (x && x.expr) expr(x.expr); }
+  });
+  const visit = (s) => {
+    if (s.name && (s.s === 'set' || s.s === 'change')) used.add(s.name);
+    for (const k of ['v', 'i', 'c', 'n']) if (s[k] && s[k].t) expr(s[k]);
+    if (s.args) s.args.forEach(expr);
+    if (s.inputs) for (const k in s.inputs) { const x = s.inputs[k]; if (x && x.t) expr(x); else if (x && x.expr) expr(x.expr); }
+  };
+  for (const p of procs) walkStmts(p.body, visit);
+  return used;
 }
 
 function listsUsed(procs, scripts) {
@@ -222,7 +265,7 @@ export function compileWasm(bytes, opts = {}) {
   // Init procedure.
   const i = 'init.i';
   const init = [
-    A.set('br', 0), A.lclear('cs'), A.set('exit code', 0),
+    A.set('br', 0), A.set('exn', 0), A.lclear('cs'), A.set('exit code', 0),
     A.lclear('stdout'), A.set('line', A.str('')),
     A.set('stdin', A.str('')), A.set('stdin.pos', 1),
   ];
@@ -262,11 +305,24 @@ export function compileWasm(bytes, opts = {}) {
     callEntry(entries.main, t.params.map(() => num(0)));
     if (t.results.length && t.results[0] === 'i32') body.push(A.set('exit code', A.sub(A.mod(A.add(v('ret'), 2147483648), U), 2147483648)));
   }
+  if (mod.tags.length) body.push(A.iff(A.gt(v('exn'), 0), [A.call(ctx.rt.use('trap'), A.str('uncaught wasm exception'))]));
   if (ctx.uses.stdout || ctx.rt.used.has('trap')) body.push(A.call(ctx.rt.use('flush')));
   if (entries.frame !== undefined) body.push(A.forever([A.call(ctx.procName(entries.frame))]));
   const scripts = [{ hat: 'event_whenflagclicked', body }];
 
   const allProcs = [...procs, ...ctx.extraProcs, ...ctx.rt.procs()];
+
+  if (ctx.gcRoots) {
+    // Every variable that may hold a wasm value, plus the saved call frames.
+    const names = [...varsUsed(allProcs)].filter((n) => !n.startsWith('prof.') && !['line', 'stdin', 'exit code'].includes(n)).sort();
+    const k = 'gc.i';
+    ctx.gcRoots.body = [
+      A.lclear('gcroots'),
+      ...names.map((n) => A.ladd('gcroots', v(n))),
+      A.set(k, 1),
+      A.repeat(A.listLen('cs'), [A.ladd('gcroots', A.item('cs', v(k))), A.change(k, 1)]),
+    ];
+  }
 
   // Lookup tables and other lists.
   for (const name of listsUsed(allProcs, scripts)) {
@@ -290,6 +346,10 @@ export function compileWasm(bytes, opts = {}) {
   const project = buildProject({
     procs: allProcs, scripts, vars, lists, monitors, costumes, extensions,
     spriteName: opts.spriteName || 'WASM',
+    // Hidden unless the program uses speech bubbles; a hidden sprite also makes
+    // "ask and wait" show its question above the input box.
+    visible: ctx.uses.say,
+    frontSprite: 'Click the green flag',
   });
   return {
     ...project,

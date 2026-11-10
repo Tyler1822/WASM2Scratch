@@ -18,6 +18,77 @@ $ node bin/wasm2sb3.js examples/queens.c --run
 ...                     (an ASCII Mandelbrot set follows)
 ```
 
+## Python in Scratch
+
+`examples/micropython.sb3` is a real Python REPL ([MicroPython](https://micropython.org)
+1.29 with floats, bignums, classes, generators, exceptions and `math`),
+compiled from C by this compiler into ordinary Scratch blocks. Type at the
+"ask" prompt; output scrolls in the list on stage:
+
+```
+>>> def fib(n):
+...     return n if n < 2 else fib(n - 1) + fib(n - 2)
+...
+>>> fib(15)
+610
+>>> 2 ** 100
+1267650600228229401496703205376
+```
+
+Load it with *File → Load from your computer* in the Scratch editor or
+TurboWarp. At ~17 MB of project.json it is too large to *save* to
+scratch.mit.edu (the server limit is about 5 MB). The first command takes a
+few seconds while Scratch looks up each custom block for the first time;
+after that, simple lines take a fraction of a second.
+
+### Python examples
+
+[examples/python/](examples/python/) has Python programs bundled into
+projects. Each one runs when you click the green flag:
+
+| | |
+|---|---|
+| ![spirograph](examples/python/spirograph.png) **spirograph.py**: hypotrochoid curves drawn live by a generator; click for a random one | ![tree](examples/python/tree.png) **tree.py**: a recursive generator grows a fractal tree; click to grow another |
+| ![paint](examples/python/paint.png) **paint.py**: paint with the mouse in cycling colours; space/b change the brush, c clears | ![snake](examples/python/snake.png) **snake.py**: steer with the arrow keys, eat apples, don't bite yourself |
+
+**adventure.py** is a small text adventure ("Escape the Stage") played
+through the ask box.
+
+Python talks to Scratch through the `scratch` module:
+
+```python
+import scratch
+scratch.pen_color(255, 0, 0)          # or 0xFF0000; pen_hue(0..100); pen_size(n)
+scratch.line(-100, 0, 100, 0)         # also: goto, pen_down, pen_up, dot, stamp, clear
+scratch.say("hi")                     # speech bubble
+scratch.mouse_x(), scratch.mouse_down(), scratch.key_pressed("left")
+scratch.timer(), scratch.clock()      # Scratch timer / wall clock (seconds)
+scratch.randint(1, 6)
+scratch.on_frame(fn)                  # call fn() every frame, with a screen refresh in between
+```
+
+Everything runs in "run without screen refresh" mode, so animations should
+do a frame's worth of work in an `on_frame` callback. The examples step a
+generator for about 30 ms per frame (measured with `scratch.clock()`).
+
+To build your own, put wasi-sdk and the MicroPython source in `toolchain/`,
+then run:
+
+```
+python/build.sh my_program.py         # -> python/build/my_program.sb3
+python/build.sh --sb3                 # the REPL
+```
+
+`node scripts/snapshot.mjs project.sb3 out.png` runs a project headlessly
+and saves what the pen drew. It can also script mouse, keyboard and ask-box
+input, which is how the previews above were made.
+
+How the port works: [python/](python/) holds a small driver (`main.c`), the
+`scratch` module (`modscratch.c`) and a MicroPython configuration. The
+garbage collector can run at any time, because every wasm local is a Scratch
+variable. The compiled program hands all of them, plus saved call frames, to
+MicroPython's GC as roots, together with the C stack in linear memory.
+
 ## Why WebAssembly (not LLVM IR)
 
 WebAssembly is a small, stable, fully specified stack machine with about 200
@@ -64,7 +135,7 @@ const { sb3, warnings, stats } = compileWasm(fs.readFileSync('prog.wasm'));
 | WASI `proc_exit`, `clock_time_get`, `random_get`, args, environ | supported |
 | `scratch.*` imports ([include/scratch.h](include/scratch.h)) | pen, go to x/y, say, mouse, keys, timer, wait |
 
-Examples are in [examples/](examples/): `hello`, `queens`, `guess` (stdin),
+Examples are in [examples/](examples/): `micropython` (see below), `hello`, `queens`, `guess` (stdin),
 and `bounce` (pen animation, built with
 `--cflags "-O2 -mexec-model=reactor -Wl,--export=frame"`). The `.sb3` files
 next to them are ready to load in Scratch.
@@ -95,10 +166,18 @@ Scratch block tree → `project.json` + zip.
   under `if br = 0`. Loops are `repeat until not (br = L)`. A `return` is
   `stop this script`. Blocks that nothing branches to are compiled in line,
   and `br_table` becomes a binary search of `if`s.
+- **Exceptions** (the WebAssembly exception-handling proposal, which is
+  what clang uses for `setjmp`/`longjmp`). A `throw` stores the tag and
+  payload in variables and unwinds to the enclosing `try` handler through the
+  same `br` mechanism. Calls to functions that may throw are followed by a
+  check that keeps unwinding.
 - **Functions** are custom blocks with "run without screen refresh" enabled.
   Locals are sprite variables. For recursive call cycles (found with Tarjan's
   SCC algorithm), the caller's live locals (from a liveness analysis) are
-  pushed to a list before each call and popped after it.
+  pushed to a list before each call and popped after it. Functions with
+  many such locals share one save/restore procedure pair to keep projects
+  small. Procedure definitions are written first in `project.json`, because
+  the VM finds them with a linear scan on first use.
 
 ## Testing
 
@@ -116,6 +195,8 @@ project in a headless scratch-vm, and the results must match exactly:
   calls and stdin.
 - The C programs in `test/c/`, built at both `-O2` and `-O0` (skipped when
   wasi-sdk isn't present).
+- MicroPython REPL sessions in `test/python/`, when `python/build.sh` has
+  been run.
 
 ## Limitations
 
@@ -132,7 +213,12 @@ project in a headless scratch-vm, and the results must match exactly:
   differ from IEEE in the last bit (double rounding).
 - **Text output** is ASCII/Latin-1; other characters print as `?`. stdin has
   no EOF.
-- **Not supported:** SIMD, threads/atomics, exceptions, multiple memories or
-  tables, `table.get`/`table.set`, and passive data segments.
+- **Not supported:** SIMD, threads/atomics, the newer `try_table`/`exnref`
+  exception instructions (the legacy `try`/`catch` form that clang emits by
+  default is supported), multiple memories or tables,
+  `table.get`/`table.set`, and passive data segments.
+- **Size.** Large programs make large projects. scratch.mit.edu only saves
+  project.json files under about 5 MB, but bigger projects still load from a
+  file.
 - **Speed.** Speed depends on the player. TurboWarp's compiler runs these
   projects much faster than vanilla Scratch.

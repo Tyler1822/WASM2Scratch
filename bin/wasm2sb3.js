@@ -81,7 +81,7 @@ async function readModule(file, opts) {
     try { ({ default: wabtInit } = await import('wabt')); } catch { fail('reading .wat files needs the "wabt" package (npm install wabt)'); }
     const wabt = await wabtInit();
     const m = wabt.parseWat(file, data.toString('utf8'), {
-      bulk_memory: true, sign_extension: true, sat_float_to_int: true, multi_value: true, tail_call: true, mutable_globals: true,
+      exceptions: true, bulk_memory: true, sign_extension: true, sat_float_to_int: true, multi_value: true, tail_call: true, mutable_globals: true,
     });
     m.resolveNames();
     m.validate();

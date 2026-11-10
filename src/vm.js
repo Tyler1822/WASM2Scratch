@@ -27,8 +27,10 @@ export async function runSb3(sb3, opts = {}) {
   let frames = 0;
   const t0 = Date.now();
   let timedOut = false;
+  let loadMs = 0;
   try {
     await vm.loadProject(sb3);
+    loadMs = Date.now() - t0;
     const answers = [...(opts.stdin || [])];
     vm.runtime.on('QUESTION', (q) => {
       if (q === null) return;
@@ -50,12 +52,12 @@ export async function runSb3(sb3, opts = {}) {
   } finally {
     console.warn = origWarn; console.error = origErr; console.log = origLog;
   }
-  const sprite = vm.runtime.targets.find((t) => !t.isStage);
+  const sprite = vm.runtime.targets.filter((t) => !t.isStage).pop(); // the code sprite is last
   const lists = {}, vars = {};
   for (const id in sprite.variables) {
     const v = sprite.variables[id];
     if (v.type === 'list') lists[v.name] = v.value; else if (v.type === '') vars[v.name] = v.value;
   }
   vm.runtime.dispose?.();
-  return { lists, vars, frames, ms: Date.now() - t0, timedOut };
+  return { lists, vars, frames, ms: Date.now() - t0, loadMs, timedOut };
 }

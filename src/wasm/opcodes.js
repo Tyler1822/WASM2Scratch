@@ -24,6 +24,13 @@ def(0x02, 'block', 'block');
 def(0x03, 'loop', 'block');
 def(0x04, 'if', 'block');
 def(0x05, 'else');
+// Legacy exception handling (what LLVM emits for setjmp/longjmp and C++ EH).
+def(0x06, 'try', 'block');
+def(0x07, 'catch', 'tag');
+def(0x08, 'throw', 'tag');
+def(0x09, 'rethrow', 'label');
+def(0x18, 'delegate', 'label');
+def(0x19, 'catch_all');
 def(0x0b, 'end');
 def(0x0c, 'br', 'label');
 def(0x0d, 'br_if', 'label');

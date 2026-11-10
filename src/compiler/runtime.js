@@ -461,7 +461,9 @@ const HELPERS = {
       repeat(P(2), [
         set(p, item(MEM, add(div(v(iv), 4), 1))), set(n, item(MEM, add(div(v(iv), 4), 2))),
         iff(and(gt(v('stdin.pos'), A.length(v('stdin'))), eq(v(t), 0)), [
-          A.stmt('sensing_askandwait', { QUESTION: A.str('') }),
+          // The unfinished output line (e.g. a prompt) becomes the question;
+          // it stays in `line`, so an echoed answer completes it.
+          A.stmt('sensing_askandwait', { QUESTION: v('line') }),
           set('stdin', A.join(A.reporter('sensing_answer'), A.str('\n'))),
           set('stdin.pos', 1),
         ]),
@@ -480,6 +482,19 @@ const HELPERS = {
       costume(A.str('blank')),
       A.lrep(MEM, add(div(P(3), 4), 1), v(t)),
       set('r', 0),
+    ];
+  } },
+
+  // gcroots_copy(buf, start, count): items start+1.. of `gcroots` -> words at buf.
+  gcroots_copy: { args: 3, body: (V) => {
+    const [i, w] = ['i', 'w'].map(V);
+    return [
+      set(i, 0), set(w, add(div(P(0), 4), 1)),
+      repeat(P(2), [
+        A.lrep(MEM, v(w), mod(floor(add(item('gcroots', add(add(P(1), v(i)), 1)), 0)), U)),
+        change(i, 1), change(w, 1),
+      ]),
+      set('r', P(2)),
     ];
   } },
 
@@ -528,6 +543,10 @@ export class Runtime {
     this.used.set(h, proc);
     for (const d of def.deps || []) this.use(d);
     proc.body = def.body((x) => `rt.${h}.${x}`, this);
+    if (this.ctx.opts.profile) {
+      proc.body.unshift(A.change(`prof.rt.${h}`, 1));
+      if (h === 'memcpy' || h === 'memfill') proc.body.unshift(A.change(`prof.rt.${h}.bytes`, P(2)));
+    }
     return proc.name;
   }
   inline1(name, args, cx) { return inline1(name, args, cx); }

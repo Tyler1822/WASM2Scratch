@@ -1,0 +1,29 @@
+1 + 1
+print("Hello from Python in Scratch!")
+x = [i * i for i in range(10)]
+x
+sum(x), max(x), len(x)
+def fib(n):
+    return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+fib(15)
+2 ** 100
+import math
+math.sqrt(2), math.pi
+"%s has %d letters" % ("scratch", len("scratch"))
+{"a": 1, "b": [2, 3]}
+class Cat:
+    def __init__(self, name):
+        self.name = name
+    def speak(self):
+        return self.name + " says meow"
+
+Cat("Scratch").speak()
+try:
+    1 / 0
+except ZeroDivisionError as e:
+    print("caught:", e)
+
+1 / 0
+sorted("hello world".split(), key=len)
+exit()

@@ -21,6 +21,7 @@ export function analyzeCallGraph(mod) {
   }
 
   const edges = new Array(n);
+  const throws = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const f = mod.funcs[i];
     const out = new Set();
@@ -34,6 +35,12 @@ export function analyzeCallGraph(mod) {
               break;
             case 'block': case 'loop': walk(ins.body); break;
             case 'if': walk(ins.then); if (ins.else) walk(ins.else); break;
+            case 'try':
+              walk(ins.body);
+              for (const c of ins.catches) walk(c.body);
+              if (ins.catchAll) walk(ins.catchAll);
+              break;
+            case 'throw': case 'rethrow': throws[i] = 1; break;
             default: break;
           }
         }
@@ -41,6 +48,17 @@ export function analyzeCallGraph(mod) {
       walk(f.body);
     }
     edges[i] = [...out];
+  }
+
+  // A function may throw if it throws itself or calls something that may.
+  // (Conservative: catching is ignored.)
+  const mayThrow = throws.slice();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let i = 0; i < n; i++) {
+      if (mayThrow[i]) continue;
+      if (edges[i].some((g) => mayThrow[g])) { mayThrow[i] = 1; changed = true; }
+    }
   }
 
   // Iterative Tarjan SCC.
@@ -95,7 +113,7 @@ export function analyzeCallGraph(mod) {
   for (let i = 0; i < n; i++) {
     if (sccSize[scc[i]] > 1 || edges[i].includes(i)) recursive[i] = 1;
   }
-  return { scc, recursive, tableFuncsBySig, edges };
+  return { scc, recursive, tableFuncsBySig, edges, mayThrow };
 }
 
 // ---- per-function structure info -------------------------------------------
@@ -145,6 +163,14 @@ export function analyzeStructure(func) {
           if (ins.else) walk(ins.else);
           ctl.pop();
           break;
+        case 'try':
+          ins.selfBr = 0;
+          ctl.push({ kind: 'block', ins });
+          walk(ins.body);
+          for (const c of ins.catches) walk(c.body);
+          if (ins.catchAll) walk(ins.catchAll);
+          ctl.pop();
+          break;
         default: break;
       }
     }
@@ -191,6 +217,7 @@ export function analyzeLiveness(func, numLocals, annotateCalls) {
   let changed = true;
   let annotate = false;
   const labels = [];
+  const exn = []; // stack: locals live on entry to the innermost exception handler
   const seq = (instrs, live) => {
     for (let i = instrs.length - 1; i >= 0; i--) {
       const ins = instrs[i];
@@ -198,8 +225,39 @@ export function analyzeLiveness(func, numLocals, annotateCalls) {
         case 'local.get': live.set(ins.idx); break;
         case 'local.set': case 'local.tee': live.clear(ins.idx); break;
         case 'call': case 'call_indirect':
+          // A call inside `try` may continue in a catch handler.
+          if (exn.length) live.or(exn[exn.length - 1]);
           if (annotate) ins.liveAfter = live.toArray();
           break;
+        case 'throw': case 'rethrow':
+          if (exn.length) live.assign(exn[exn.length - 1]); else live.zero();
+          break;
+        case 'try': {
+          const after = live.clone();
+          // Any enclosing handler may receive what escapes (delegate can skip levels).
+          const outer = new Bits(numLocals);
+          for (const e of exn) outer.or(e);
+          // Locals live on entry to any handler.
+          const handler = new Bits(numLocals);
+          if (ins.delegate !== null) {
+            handler.or(outer);
+          } else {
+            labels.push(after);
+            for (const body of [...ins.catches.map((c) => c.body), ...(ins.catchAll ? [ins.catchAll] : [])]) {
+              const h = after.clone();
+              seq(body, h);
+              handler.or(h);
+            }
+            labels.pop();
+            if (!ins.catchAll) handler.or(outer);
+          }
+          labels.push(after);
+          exn.push(handler);
+          seq(ins.body, live);
+          exn.pop();
+          labels.pop();
+          break;
+        }
         case 'return_call': case 'return_call_indirect':
           live.zero();
           if (annotate) ins.liveAfter = [];

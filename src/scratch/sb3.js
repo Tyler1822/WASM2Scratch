@@ -126,6 +126,15 @@ export function buildProject(program) {
   let x = 600;
   for (const p of program.procs) { w.procedure(p, x, 0); x += 600; }
 
+  // scratch-vm finds a custom block's definition by scanning the sprite's
+  // blocks in order on its first call, so put every definition and
+  // prototype first; otherwise large projects spend seconds in those scans.
+  const blocks = {};
+  const head = (b) => b.opcode === 'procedures_definition' || b.opcode === 'procedures_prototype'
+    || (b.shadow && b.opcode === 'argument_reporter_string_number');
+  for (const id in w.blocks) if (head(w.blocks[id])) blocks[id] = w.blocks[id];
+  for (const id in w.blocks) if (!head(w.blocks[id])) blocks[id] = w.blocks[id];
+
   const variables = {};
   for (const [name, id] of varIds) variables[id] = [name, vars.get(name)];
   const listsJson = {};
@@ -145,10 +154,20 @@ export function buildProject(program) {
     sounds: [], volume: 100, layerOrder: 0, tempo: 60, videoTransparency: 50, videoState: 'on', textToSpeechLanguage: null,
   };
   const sprite = {
-    isStage: false, name: program.spriteName || 'WASM', variables, lists: listsJson, broadcasts: {}, blocks: w.blocks, comments: {},
+    isStage: false, name: program.spriteName || 'WASM', variables, lists: listsJson, broadcasts: {}, blocks, comments: {},
     currentCostume: 0, costumes: spriteCostumes, sounds: [], volume: 100, layerOrder: 1,
-    visible: true, x: 0, y: 0, size: 100, direction: 90, draggable: false, rotationStyle: 'all around',
+    visible: program.visible !== false, x: 0, y: 0, size: 100, direction: 90, draggable: false, rotationStyle: 'all around',
   };
+
+  // The editor renders the first sprite's scripts when a project opens. For
+  // very large programs, put an empty sprite first so the editor stays
+  // responsive; the code sprite is still one click away.
+  const wantFront = program.frontSprite && w.blockCount > (program.frontThreshold ?? 20000);
+  const front = wantFront ? [{
+    isStage: false, name: program.frontSprite, variables: {}, lists: {}, broadcasts: {}, blocks: {}, comments: {},
+    currentCostume: 0, costumes: [spriteCostumes[0]], sounds: [], volume: 100, layerOrder: 2,
+    visible: false, x: 0, y: 0, size: 100, direction: 90, draggable: false, rotationStyle: 'all around',
+  }] : [];
 
   const monitors = [];
   for (const m of program.monitors || []) {
@@ -167,7 +186,7 @@ export function buildProject(program) {
   }
 
   const project = {
-    targets: [stage, sprite],
+    targets: [stage, ...front, sprite],
     monitors,
     extensions: program.extensions || [],
     meta: { semver: '3.0.0', vm: '0.2.0', agent: 'wasm2sb3' },

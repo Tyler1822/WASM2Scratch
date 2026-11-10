@@ -1,0 +1,5 @@
+# Generates the self-contained MicroPython sources (python/build/micropython_embed).
+MICROPYTHON_TOP ?= ../toolchain/micropython-1.29.0
+PACKAGE_DIR = build/micropython_embed
+BUILD = build/build-embed
+include $(MICROPYTHON_TOP)/ports/embed/embed.mk

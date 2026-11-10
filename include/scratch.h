@@ -21,6 +21,7 @@ SCRATCH_IMPORT(pen_up)    void pen_up(void);
 SCRATCH_IMPORT(pen_stamp) void pen_stamp(void);
 SCRATCH_IMPORT(pen_color) void pen_color(int rgb);      /* 0xRRGGBB */
 SCRATCH_IMPORT(pen_size)  void pen_size(double size);
+SCRATCH_IMPORT(pen_hue)   void pen_hue(double hue);       /* Scratch colour 0-100 */
 
 /* Motion and looks */
 SCRATCH_IMPORT(goto_xy) void goto_xy(double x, double y);
@@ -33,12 +34,19 @@ SCRATCH_IMPORT(mouse_x)     double mouse_x(void);
 SCRATCH_IMPORT(mouse_y)     double mouse_y(void);
 SCRATCH_IMPORT(mouse_down)  int mouse_down(void);
 SCRATCH_IMPORT(key_pressed) int key_pressed(int key);   /* ASCII, or one of the KEY_* codes */
-SCRATCH_IMPORT(timer)       double timer(void);
+SCRATCH_IMPORT(timer)       double timer(void);       /* advances once per frame */
+__attribute__((import_module("scratch"), import_name("clock")))
+double wall_clock(void);   /* wall-clock seconds, always moving (unlike timer) */
 SCRATCH_IMPORT(reset_timer) void reset_timer(void);
 
 /* Control */
 SCRATCH_IMPORT(wait)       void wait(double seconds);
 SCRATCH_IMPORT(random_int) int random_int(int lo, int hi); /* inclusive */
+
+/* Garbage-collector support (see python/main.c): every Scratch variable that
+ * may hold a wasm value, as u32 words, for conservative root scanning. */
+SCRATCH_IMPORT(gc_roots_begin) int gc_roots_begin(void);
+SCRATCH_IMPORT(gc_roots_copy)  int gc_roots_copy(void *buf, int start, int count);
 
 #define KEY_SPACE 32
 #define KEY_ENTER 10

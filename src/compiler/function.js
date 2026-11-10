@@ -49,6 +49,21 @@ function readsOf(ty, e) {
 }
 const entry = (ty, e) => ({ ty, e, r: readsOf(ty, e) });
 
+export function restoreStmts(names) {
+  const out = [];
+  for (const n of names.slice().reverse()) {
+    out.push(A.set(n, A.item('cs', A.str('last'))));
+    out.push(A.ldel('cs', 'last'));
+  }
+  return out;
+}
+
+function containsRethrow(instrs) {
+  return instrs.some((i) => i.op === 'rethrow'
+    || (i.body && containsRethrow(i.body)) || (i.then && containsRethrow(i.then)) || (i.else && containsRethrow(i.else))
+    || (i.catches && i.catches.some((c) => containsRethrow(c.body))) || (i.catchAll && containsRethrow(i.catchAll)));
+}
+
 export class FuncCompiler {
   constructor(ctx, func) {
     this.ctx = ctx;
@@ -78,7 +93,10 @@ export class FuncCompiler {
   isOwn(name) { return name.startsWith(this.fp + '.'); }
   isTransient(name) { return name.startsWith(this.fp + '.x') || name === 'r' || name === 'rh' || name === 'r2' || name === 'r2h'; }
   slotNames(d, ty) { return ty === 'i64' ? [this.svar(d), this.svar(d, 1)] : [this.svar(d)]; }
-  paramIsArg(i) { return i < this.params.length && !this.written.has(i); }
+  // Unassigned parameters are read straight from the block's arguments, except
+  // when the program scans Scratch variables for GC roots (arguments are not
+  // visible to such a scan, so every parameter gets a variable).
+  paramIsArg(i) { return i < this.params.length && !this.written.has(i) && !this.ctx.uses.gcroots; }
 
   emit(s) { this.out.push(s); }
   withOut(arr, fn) {
@@ -206,6 +224,7 @@ export class FuncCompiler {
     this.ctl.push({ kind: 'func', btypes: this.results, height: 0 });
     const { stmts } = this.compileSeq(this.func.body, () => this.emitReturn(this.results.length, true));
     this.ctl.pop();
+    if (this.ctx.opts.profile) prologue.unshift(A.change(`prof.${this.name}`, 1));
     return { name: this.name, args, warp: true, body: [...prologue, ...stmts] };
   }
 
@@ -309,10 +328,17 @@ export class FuncCompiler {
       case 'unreachable':
         this.emit(A.call(this.ctx.rt.use('trap'), A.str(`unreachable executed in ${this.name}`)));
         return 'term';
-      case 'call': return this.compileCall(ins, false);
-      case 'return_call': this.compileCall(ins, false); this.emitReturn(this.results.length, false); return 'term';
+      case 'call': return this.compileCall(ins);
       case 'call_indirect': return this.compileCallIndirect(ins);
-      case 'return_call_indirect': this.compileCallIndirect(ins); this.emitReturn(this.results.length, false); return 'term';
+      case 'return_call': case 'return_call_indirect': {
+        const st = ins.op === 'return_call' ? this.compileCall(ins) : this.compileCallIndirect(ins);
+        if (typeof st === 'object') this.out = st.split;
+        this.emitReturn(this.results.length, false);
+        return 'term';
+      }
+      case 'try': return this.compileTry(ins);
+      case 'throw': return this.compileThrow(ins);
+      case 'rethrow': return this.compileRethrow(ins);
       default: this.compileOp(ins); return 'ok';
     }
   }
@@ -344,7 +370,8 @@ export class FuncCompiler {
     this.ctl.pop();
     if (c.used) {
       this.emit(A.set('br', c.label));
-      this.emit(A.until(A.not(A.eq(v('br'), c.label)), [A.set('br', 0), ...stmts]));
+      const prof = this.ctx.opts.profile ? [A.change(`prof.loop.${this.name}`, 1)] : [];
+      this.emit(A.until(A.not(A.eq(v('br'), c.label)), [A.set('br', 0), ...prof, ...stmts]));
     } else {
       this.out.push(...stmts);
     }
@@ -414,6 +441,33 @@ export class FuncCompiler {
   }
 
   // Saves live locals (and stacked slots) around a call within our SCC.
+  // Union of the locals live across this function's recursive calls.
+  frameLocals() {
+    if (this._frameLocals) return this._frameLocals;
+    const live = new Set();
+    const walk = (is) => {
+      for (const i of is) {
+        if ((i.op === 'call' || i.op === 'call_indirect') && i.liveAfter) {
+          const same = i.op === 'call'
+            ? this.ctx.cg.scc[i.func] === this.scc
+            : (this.ctx.cg.tableFuncsBySig.get(sigKey(this.mod.types[i.type])) || []).some((f) => this.ctx.cg.scc[f] === this.scc);
+          if (same) i.liveAfter.forEach((x) => live.add(x));
+        }
+        for (const k of ['body', 'then', 'else', 'catchAll']) if (i[k]) walk(i[k]);
+        if (i.catches) i.catches.forEach((c) => walk(c.body));
+      }
+    };
+    if (this.recursive) walk(this.func.body);
+    const names = [];
+    for (const i of [...live].sort((a, b) => a - b)) {
+      if (this.paramIsArg(i)) continue;
+      names.push(this.lvar(i));
+      if (this.ltypes[i] === 'i64') names.push(this.lvar(i, 1));
+    }
+    this._frameLocals = names;
+    return names;
+  }
+
   saveSet(ins) {
     const names = new Set();
     for (const i of ins.liveAfter || []) {
@@ -425,18 +479,156 @@ export class FuncCompiler {
     return [...names];
   }
 
-  emitCall(procName, args, sameScc, ins, results) {
-    const save = sameScc ? this.saveSet(ins) : [];
+  // ---- exceptions ----------------------------------------------------------
+  //
+  // The in-flight exception lives in the global variables `exn` (tag index + 1,
+  // or 0) and `exn.K` / `exn.Kh` (payload). A throw unwinds to the handler of
+  // the innermost enclosing `try` in this function by setting `br` to that
+  // try's handler label, or returns from the custom block when there is none;
+  // callers check `exn` after every call that may throw.
+
+  unwindFrom(idx) {
+    for (let i = idx; i >= 1; i--) {
+      const t = this.ctl[i];
+      if (t.kind === 'try' && t.inBody) {
+        for (let j = i + 1; j < this.ctl.length; j++) this.ctl[j].escaped = true;
+        t.handlerUsed = true;
+        this.emit(A.set('br', t.H));
+        return 'set';
+      }
+    }
+    this.emit(A.stopThis());
+    return 'ret';
+  }
+
+  exnCheck() {
+    const arm = [];
+    this.withOut(arm, () => this.unwindFrom(this.ctl.length - 1));
+    const rest = [];
+    this.emit(A.iff(A.gt(v('exn'), 0), arm, rest));
+    return { split: rest };
+  }
+
+  tagPayloadNames(tag) {
+    const names = [];
+    this.mod.tags[tag].type.params.forEach((ty, k) => {
+      names.push(`exn.${k}`);
+      if (ty === 'i64') names.push(`exn.${k}h`);
+    });
+    return names;
+  }
+
+  allPayloadNames() {
+    const set = new Set();
+    this.mod.tags.forEach((_, t) => this.tagPayloadNames(t).forEach((n) => set.add(n)));
+    return [...set];
+  }
+
+  compileThrow(ins) {
+    const params = this.mod.tags[ins.tag].type.params;
+    const vals = this.popN(params.length);
+    const names = this.tagPayloadNames(ins.tag);
+    this.flushVars([...names, 'exn']);
+    const flat = vals.flatMap(parts);
+    this.parallelSet(names.map((n, k) => ({ name: n, e: flat[k] })));
+    this.emit(A.set('exn', ins.tag + 1));
+    this.unwindFrom(this.ctl.length - 1);
+    return 'term';
+  }
+
+  compileRethrow(ins) {
+    const t = this.ctl[this.ctl.length - 1 - ins.depth];
+    if (!t || t.kind !== 'try' || !t.saved) throw new Error('rethrow target is not a catch block');
+    const names = ['exn', ...this.allPayloadNames()];
+    this.flushVars(names);
+    names.forEach((n) => this.emit(A.set(n, v(`${t.saved}.${n}`))));
+    this.unwindFrom(this.ctl.length - 1);
+    return 'term';
+  }
+
+  compileTry(ins) {
+    const { params, results } = this.btype(ins.bt);
+    this.spillAll();
+    const h = this.stack.length - params.length;
+    const c = { kind: 'try', label: this.nextLabel++, H: this.nextLabel++, height: h, btypes: results, inBody: true };
+    const hasRethrow = [...ins.catches.map((ct) => ct.body), ins.catchAll || []].some(containsRethrow);
+    if (hasRethrow) c.saved = `${this.fp}.e${c.label}`;
+    this.ctl.push(c);
+    const base = this.stack.slice(0, h);
+    const body = this.compileSeq(ins.body, () => this.setSlots(h, results.length));
+    c.inBody = false;
+    this.out.push(...body.stmts);
+    let armsReachEnd = false;
+    if (c.handlerUsed) {
+      const handler = [A.set('br', 0)];
+      this.withOut(handler, () => {
+        if (ins.delegate !== null) {
+          this.unwindFrom(this.ctl.length - 2 - ins.delegate);
+          return;
+        }
+        const arms = [];
+        const compileArm = (tag, armBody) => {
+          const stmts = [];
+          this.withOut(stmts, () => {
+            if (c.saved) ['exn', ...this.allPayloadNames()].forEach((n) => this.emit(A.set(`${c.saved}.${n}`, v(n))));
+            this.emit(A.set('exn', 0));
+          });
+          this.stack = base.slice();
+          if (tag !== null) {
+            const names = this.tagPayloadNames(tag);
+            let k = 0;
+            for (const ty of this.mod.tags[tag].type.params) {
+              this.stack.push(entry(ty, ty === 'i64' ? [v(names[k]), v(names[k + 1])] : v(names[k])));
+              k += ty === 'i64' ? 2 : 1;
+            }
+          }
+          const r = this.compileSeq(armBody, () => this.setSlots(h, results.length));
+          if (!r.terminated) armsReachEnd = true;
+          return [...stmts, ...r.stmts];
+        };
+        for (const ct of ins.catches) arms.push({ cond: A.eq(v('exn'), ct.tag + 1), stmts: compileArm(ct.tag, ct.body) });
+        let fallback;
+        if (ins.catchAll) fallback = compileArm(null, ins.catchAll);
+        else {
+          fallback = [];
+          this.withOut(fallback, () => this.unwindFrom(this.ctl.length - 2)); // no match: keep unwinding
+        }
+        let chain = fallback;
+        for (let k = arms.length - 1; k >= 0; k--) chain = [A.iff(arms[k].cond, arms[k].stmts, chain)];
+        this.out.push(...chain);
+      });
+      this.emit(A.iff(A.eq(v('br'), c.H), handler));
+    }
+    this.ctl.pop();
+    if (c.used) this.emit(A.iff(A.eq(v('br'), c.label), [A.set('br', 0)]));
+    this.stack = base;
+    this.pushSlots(h, results);
+    if (body.terminated && !c.used && !c.reached && !armsReachEnd) return 'term';
+    return c.escaped ? 'maybe' : 'ok';
+  }
+
+  emitCall(procName, args, sameScc, ins, results, mayThrow) {
+    let save = sameScc ? this.saveSet(ins) : [];
+    // Functions with many locals to preserve use one shared pair of
+    // save/restore procedures holding every local that is live across any of
+    // their recursive calls; only extra stack slots are saved inline.
+    let frame = null;
+    if (save.length && this.frameLocals().length >= 3) {
+      const fl = this.frameLocals();
+      frame = this.ctx.frameProcs(fl);
+      const inFrame = new Set(fl);
+      save = save.filter((n) => !inFrame.has(n));
+    }
+    if (frame) this.emit(A.call(frame.save));
     for (const n of save) this.emit(A.ladd('cs', v(n)));
     this.emit(A.call(procName, ...args));
-    for (const n of save.slice().reverse()) {
-      this.emit(A.set(n, A.item('cs', A.str('last'))));
-      this.emit(A.ldel('cs', 'last'));
-    }
+    for (const stmt of restoreStmts(save)) this.emit(stmt);
+    if (frame) this.emit(A.call(frame.restore));
     results.forEach((ty, i) => {
       const base = i === 0 ? 'ret' : 'ret' + i;
       this.stack.push(entry(ty, ty === 'i64' ? [v(base), v(base + 'h')] : v(base)));
     });
+    return mayThrow ? this.exnCheck() : 'ok';
   }
 
   compileCall(ins) {
@@ -452,8 +644,7 @@ export class FuncCompiler {
     const sameScc = this.recursive && this.ctx.cg.scc[ins.func] === this.scc;
     this.flushForCall(type.params.length, sameScc);
     const args = this.popN(type.params.length).flatMap(parts);
-    this.emitCall(this.ctx.procName(ins.func), args, sameScc, ins, type.results);
-    return 'ok';
+    return this.emitCall(this.ctx.procName(ins.func), args, sameScc, ins, type.results, this.ctx.cg.mayThrow[ins.func]);
   }
 
   compileCallIndirect(ins) {
@@ -463,8 +654,8 @@ export class FuncCompiler {
     this.flushForCall(type.params.length + 1, sameScc);
     const idx = this.pop();
     const args = this.popN(type.params.length).flatMap(parts);
-    this.emitCall(this.ctx.dispatcher(ins.type), [idx.e, ...args], sameScc, ins, type.results);
-    return 'ok';
+    const mayThrow = targets.some((f) => this.ctx.cg.mayThrow[f]);
+    return this.emitCall(this.ctx.dispatcher(ins.type), [idx.e, ...args], sameScc, ins, type.results, mayThrow);
   }
 
   // ---- straight-line operations ------------------------------------------
