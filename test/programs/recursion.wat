@@ -1,0 +1,52 @@
+(module
+  ;;@prelude
+  (func $ack (param $m i32) (param $n i32) (result i32)
+    (if (result i32) (i32.eqz (local.get $m))
+      (then (i32.add (local.get $n) (i32.const 1)))
+      (else
+        (if (result i32) (i32.eqz (local.get $n))
+          (then (call $ack (i32.sub (local.get $m) (i32.const 1)) (i32.const 1)))
+          (else (call $ack (i32.sub (local.get $m) (i32.const 1))
+                           (call $ack (local.get $m) (i32.sub (local.get $n) (i32.const 1)))))))))
+  (func $isEven (param $n i32) (result i32)
+    (local $t i32)
+    (local.set $t (i32.mul (local.get $n) (i32.const 3)))
+    (if (result i32) (i32.eqz (local.get $n))
+      (then (i32.const 1))
+      (else (i32.add (i32.sub (call $isOdd (i32.sub (local.get $n) (i32.const 1))) (local.get $t))
+                     (i32.mul (local.get $n) (i32.const 3))))))
+  (func $isOdd (param $n i32) (result i32)
+    (if (result i32) (i32.eqz (local.get $n))
+      (then (i32.const 0))
+      (else (call $isEven (i32.sub (local.get $n) (i32.const 1))))))
+  ;; i64 locals that must survive recursive calls; argument modified in body
+  (func $sum64 (param $n i64) (result i64)
+    (local $sq i64)
+    (local.set $sq (i64.mul (local.get $n) (local.get $n)))
+    (if (result i64) (i64.eqz (local.get $n))
+      (then (i64.const 0))
+      (else
+        (local.set $n (i64.sub (local.get $n) (i64.const 1)))
+        (i64.add (local.get $sq) (call $sum64 (local.get $n))))))
+  ;; value on the operand stack across a recursive call
+  (func $tri (param $n i32) (result i32)
+    (if (result i32) (i32.le_s (local.get $n) (i32.const 0))
+      (then (i32.const 0))
+      (else (i32.add (local.get $n) (call $tri (i32.sub (local.get $n) (i32.const 1)))))))
+  (func $hanoi (param $n i32) (param $from i32) (param $to i32) (param $via i32) (result i32)
+    (if (result i32) (i32.eqz (local.get $n))
+      (then (i32.const 0))
+      (else
+        (i32.add
+          (i32.add
+            (call $hanoi (i32.sub (local.get $n) (i32.const 1)) (local.get $from) (local.get $via) (local.get $to))
+            (i32.const 1))
+          (call $hanoi (i32.sub (local.get $n) (i32.const 1)) (local.get $via) (local.get $to) (local.get $from))))))
+  (func $main (export "_start")
+    (call $p (call $ack (i32.const 2) (i32.const 3)))
+    (call $p (call $ack (i32.const 3) (i32.const 3)))
+    (call $p (call $isEven (i32.const 10)))
+    (call $p (call $isEven (i32.const 7)))
+    (call $p64 (call $sum64 (i64.const 30)))
+    (call $p (call $tri (i32.const 100)))
+    (call $p (call $hanoi (i32.const 10) (i32.const 1) (i32.const 3) (i32.const 2)))))
