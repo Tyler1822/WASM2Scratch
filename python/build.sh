@@ -3,6 +3,10 @@
 #
 #   ./build.sh                 the REPL:   build/micropython.wasm (+ .sb3 with --sb3)
 #   ./build.sh app.py          a program:  build/app.wasm and build/app.sb3
+#   ./build.sh --list [d.py]   generic runner whose program is an editable
+#                              Scratch list (starting with d.py): build/python_runner.sb3
+#   ./build.sh --hybrid        that runner as an interpreter/native hybrid small
+#                              enough to save online: build/python_runner_hybrid.sb3
 #
 # Needs wasi-sdk in ../toolchain/ (or $WASI_SDK_PATH) and the MicroPython
 # source in ../toolchain/micropython-*/.
@@ -30,6 +34,20 @@ CFLAGS="$SJLJ $OPT -DNDEBUG -I. -I../include -Ibuild/micropython_embed -Wno-unus
 LDFLAGS="-Wl,-z,stack-size=65536 -Wl,--strip-debug -lsetjmp -lm"
 
 case "$1" in
+  --list)
+    # Generic runner: the program lives in an editable Scratch list.
+    DEFAULT=${2:-../examples/python/runner_default.py}
+    "$CC" $CFLAGS -DSCRATCH_LIST_SCRIPT -mexec-model=reactor -o build/python_runner.wasm main.c modscratch.c $SRCS $LDFLAGS
+    ls -l build/python_runner.wasm
+    node "$ROOT/bin/wasm2sb3.js" build/python_runner.wasm --entry start --script-list "$DEFAULT" -o build/python_runner.sb3
+    ;;
+  --hybrid)
+    # The list runner as a hybrid: interpreted MicroPython with its hottest
+    # functions (interp/python_native.txt) compiled to Scratch blocks.
+    "$CC" $CFLAGS -DSCRATCH_LIST_SCRIPT -mexec-model=reactor -o build/python_runner.wasm main.c modscratch.c $SRCS $LDFLAGS
+    SB3=1 "$ROOT/interp/hybrid.sh" build/python_runner.wasm "$ROOT/interp/python_native.txt" python_runner_hybrid
+    cp "$ROOT/interp/build/python_runner_hybrid.sb3" build/
+    ;;
   *.py)
     NAME=$(basename "$1" .py)
     python3 - "$1" "$NAME" > build/script.h <<'PY'

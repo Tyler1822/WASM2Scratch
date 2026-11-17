@@ -16,6 +16,7 @@
 // Statements:
 //   {s:'set', name, v} {s:'change', name, v}
 //   {s:'ladd', list, v} {s:'ldel', list, i} {s:'lclear', list} {s:'lrep', list, i, v} {s:'lins', list, i, v}
+//   {s:'lshow', list, show}    show/hide the list's monitor
 //   {s:'if', c, a, b} {s:'until', c, body} {s:'repeat', n, body} {s:'forever', body}
 //   {s:'call', proc, args} {s:'stop', what}
 //   {s:'blk', opcode, inputs, fields, substacks}
@@ -71,6 +72,7 @@ export const change = (name, x) => ({ s: 'change', name, v: E(x) });
 export const ladd = (list, x) => ({ s: 'ladd', list, v: E(x) });
 export const ldel = (list, i) => ({ s: 'ldel', list, i: typeof i === 'string' ? str(i) : E(i) });
 export const lclear = (list) => ({ s: 'lclear', list });
+export const lshow = (list, show) => ({ s: 'lshow', list, show });
 export const lrep = (list, i, x) => ({ s: 'lrep', list, i: typeof i === 'string' ? str(i) : E(i), v: E(x) });
 export const lins = (list, i, x) => ({ s: 'lins', list, i: E(i), v: E(x) });
 export const iff = (c, a, b = null) => ({ s: 'if', c, a, b });

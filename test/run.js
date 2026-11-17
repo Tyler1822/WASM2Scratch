@@ -114,7 +114,7 @@ for (const c of selected) {
     const wasm = c.wasm ? c.wasm() : watToWasm(c.wat(), c.name);
     const stdin = c.stdinFile && fs.existsSync(c.stdinFile) ? fs.readFileSync(c.stdinFile, 'utf8').split('\n') : [];
     const native = await runNative(wasm, { stdin });
-    const compiled = compileWasm(wasm);
+    const compiled = compileWasm(wasm, { minify: !!process.env.MINIFY, keepNames: ['mem'] });
     if (keep) fs.writeFileSync(path.join(here, '..', 'build', c.name.replace(/[^\w.-]/g, '_') + '.sb3'), compiled.sb3);
     const res = await runSb3(compiled.sb3, { stdin, timeout: 300000 });
     const problems = [];

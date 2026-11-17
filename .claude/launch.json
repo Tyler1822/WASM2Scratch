@@ -4,8 +4,22 @@
     {
       "name": "sb3-server",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["scripts/serve.js", "python/build", "8765"],
+      "runtimeArgs": [
+        "scripts/serve.js",
+        "python/build",
+        "8765"
+      ],
       "port": 8765
+    },
+    {
+      "name": "doom-server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/serve.js",
+        "doom/build",
+        "8766"
+      ],
+      "port": 8766
     }
   ]
 }

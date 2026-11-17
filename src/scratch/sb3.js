@@ -120,7 +120,9 @@ export function buildProject(program) {
   for (const name of vars.keys()) varId(name);
   for (const name of lists.keys()) listId(name);
 
-  const w = new BlockWriter({ varId, listId });
+  const keep = new Set([...(program.keepNames || []), ...(program.monitors || []).map((m) => m.list || m.var)]);
+  const w = new BlockWriter({ varId, listId, minify: !!program.minify, keep });
+  const shown = (name, id) => (program.minify && !keep.has(name) ? id : name);
   let y = 0;
   for (const s of program.scripts) { w.script(s.hat, s.body, 0, y); y += 400; }
   let x = 600;
@@ -135,10 +137,20 @@ export function buildProject(program) {
   for (const id in w.blocks) if (head(w.blocks[id])) blocks[id] = w.blocks[id];
   for (const id in w.blocks) if (!head(w.blocks[id])) blocks[id] = w.blocks[id];
 
+  // Minified projects leave out null `next` links (optional in the sb3
+  // schema; a missing link reads as the end of the stack). `parent` has to
+  // stay: scratch-vm walks it from the running block to find its script.
+  if (program.minify && !process.env.WASM2SB3_KEEP_LINKS) {
+    for (const id in blocks) {
+      const b = blocks[id];
+      if (b.next === null) delete b.next;
+    }
+  }
+
   const variables = {};
-  for (const [name, id] of varIds) variables[id] = [name, vars.get(name)];
+  for (const [name, id] of varIds) variables[id] = [shown(name, id), vars.get(name)];
   const listsJson = {};
-  for (const [name, id] of listIds) listsJson[id] = [name, lists.get(name)];
+  for (const [name, id] of listIds) listsJson[id] = [shown(name, id), lists.get(name)];
 
   const backdrop = asset(BACKDROP_SVG);
   const costume = asset(SPRITE_SVG);
@@ -162,7 +174,9 @@ export function buildProject(program) {
   // The editor renders the first sprite's scripts when a project opens. For
   // very large programs, put an empty sprite first so the editor stays
   // responsive; the code sprite is still one click away.
-  const wantFront = program.frontSprite && w.blockCount > (program.frontThreshold ?? 20000);
+  // frontThreshold: block count above which the empty front sprite is added
+  // (0 = always, Infinity = never). Even ~15k blocks make the editor lag.
+  const wantFront = program.frontSprite && w.blockCount > (program.frontThreshold ?? 5000);
   const front = wantFront ? [{
     isStage: false, name: program.frontSprite, variables: {}, lists: {}, broadcasts: {}, blocks: {}, comments: {},
     currentCostume: 0, costumes: [spriteCostumes[0]], sounds: [], volume: 100, layerOrder: 2,

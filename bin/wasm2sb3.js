@@ -16,6 +16,12 @@ options:
   --run               also run the project headlessly in scratch-vm and print its output
   --stdin TEXT        line of input for --run (repeatable)
   --json FILE         also write the raw project.json
+  --front-sprite      always open the editor on an empty sprite (default: above 5000 blocks)
+  --no-front-sprite   never add that sprite
+  --script-list FILE  initial contents of the "Python code" list (one item per line)
+  --minify            smallest project.json: short names, no hidden input
+                      defaults, tables and memory built at the green flag
+  --gc-roots REGEX    only variables matching REGEX are GC roots (gc_roots_begin)
   --cflags "FLAGS"    extra clang flags for .c input (e.g. "-O2 -mexec-model=reactor -Wl,--export=frame")
   -q, --quiet         no statistics
   -h, --help          show this help`;
@@ -30,7 +36,12 @@ function parseArgs(argv) {
     else if (a === '--run') o.run = true;
     else if (a === '--stdin') o.stdin.push(next());
     else if (a === '--json') o.json = next();
+    else if (a === '--script-list') o.scriptList = next();
+    else if (a === '--front-sprite') o.frontSprite = true;
+    else if (a === '--no-front-sprite') o.frontSprite = false;
     else if (a === '--cflags') o.cflags = next();
+    else if (a === '--minify') o.minify = true;
+    else if (a === '--gc-roots') o.gcRoots = new RegExp(next());
     else if (a === '-q' || a === '--quiet') o.quiet = true;
     else if (a === '-h' || a === '--help') { console.log(USAGE); process.exit(0); }
     else if (a.startsWith('-')) fail(`unknown option ${a}`);
@@ -94,7 +105,8 @@ const opts = parseArgs(process.argv.slice(2));
 let result;
 try {
   const wasm = await readModule(opts.input, opts);
-  result = compileWasm(wasm, { entry: opts.entry, spriteName: path.basename(opts.input).replace(/\.\w+$/, '') });
+  const scriptLines = opts.scriptList ? fs.readFileSync(opts.scriptList, 'utf8').replace(/\t/g, '    ').replace(/\n$/, '').split('\n') : undefined;
+  result = compileWasm(wasm, { entry: opts.entry, scriptLines, frontSprite: opts.frontSprite, minify: opts.minify, gcRoots: opts.gcRoots, spriteName: path.basename(opts.input).replace(/\.\w+$/, '') });
 } catch (e) {
   fail(e.message);
 }

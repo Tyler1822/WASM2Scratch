@@ -4,3 +4,9 @@ toolchain/
 python/build/
 python/build-embed/
 .DS_Store
+interp/build/
+
+# Doom: downloaded source, WAD and build outputs
+doom/vendor/
+doom/wad/
+doom/build/

@@ -485,6 +485,30 @@ const HELPERS = {
     ];
   } },
 
+  // strcopy(text, ptr, cap): writes up to cap characters of text into memory
+  // as bytes (ASCII; other characters become '?') and returns the count in r.
+  strcopy: { args: 3, body: (V) => {
+    const [i, p, n, c, b] = ['i', 'p', 'n', 'c', 'b'].map(V);
+    const tt = { i: V('ti'), k: V('tk'), w: V('tw') };
+    const costume = (x) => A.stmt('looks_switchcostumeto', { COSTUME: { menu: 'looks_costume', field: 'COSTUME', value: 'blank', expr: x } });
+    return [
+      set(n, A.length(P(0))),
+      iff(gt(v(n), P(2)), [set(n, P(2))]),
+      set(i, 1), set(p, P(1)),
+      repeat(v(n), [
+        set(c, A.letter(v(i), P(0))),
+        // Character code via the costume-name trick (names are case-sensitive).
+        costume(A.str('blank')), costume(v(c)),
+        set(b, add(A.reporter('looks_costumenumbername', {}, { NUMBER_NAME: 'number' }), 30)),
+        iff(eq(v(b), 31), [set(b, 63)]),
+        ...storeSub(v(p), v(b), 1, tt),
+        change(p, 1), change(i, 1),
+      ]),
+      costume(A.str('blank')),
+      set('r', v(n)),
+    ];
+  } },
+
   // gcroots_copy(buf, start, count): items start+1.. of `gcroots` -> words at buf.
   gcroots_copy: { args: 3, body: (V) => {
     const [i, w] = ['i', 'w'].map(V);

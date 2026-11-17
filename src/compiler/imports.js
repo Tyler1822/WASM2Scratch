@@ -17,6 +17,8 @@ const { num, v } = A;
 const WASI_MODULES = new Set(['wasi_snapshot_preview1', 'wasi_unstable']);
 const SCRATCH_MODULES = new Set(['scratch', 'env']);
 
+export const SCRIPT_LIST = 'Python code';
+
 const sig = (t) => `${t.params.join(',')}->${t.results.join(',')}`;
 
 function storeWord(cx, ptr, off, val) {
@@ -117,14 +119,23 @@ const SCRATCH = {
   } },
   pen_size: { sig: 'f64->', fn: (cx, a) => { cx.ctx.uses.pen = true; cx.emit(A.stmt('pen_setPenSizeTo', { SIZE: a[0].e })); return []; } },
   goto_xy: { sig: 'f64,f64->', fn: (cx, a) => { cx.emit(A.stmt('motion_gotoxy', { X: a[0].e, Y: a[1].e })); return []; } },
+  // The sprite starts hidden (so "ask and wait" shows its question above the
+  // input box); speech bubbles show it first.
   say: { sig: 'i32->', fn: (cx, a) => {
-    cx.ctx.uses.say = true;
     cx.emit(A.call(cx.ctx.rt.use('cstr'), a[0].e));
+    cx.emit(A.stmt('looks_show'));
     cx.emit(A.stmt('looks_say', { MESSAGE: v('r') }));
     return [];
   } },
-  say_int: { sig: 'i32->', fn: (cx, a) => { cx.ctx.uses.say = true; cx.emit(A.stmt('looks_say', { MESSAGE: signed32(a[0].e) })); return []; } },
-  say_num: { sig: 'f64->', fn: (cx, a) => { cx.ctx.uses.say = true; cx.emit(A.stmt('looks_say', { MESSAGE: a[0].e })); return []; } },
+  say_int: { sig: 'i32->', fn: (cx, a) => { cx.emit(A.stmt('looks_show')); cx.emit(A.stmt('looks_say', { MESSAGE: signed32(a[0].e) })); return []; } },
+  say_num: { sig: 'f64->', fn: (cx, a) => { cx.emit(A.stmt('looks_show')); cx.emit(A.stmt('looks_say', { MESSAGE: a[0].e })); return []; } },
+  stdout_visible: { sig: 'i32->', fn: (cx, a) => {
+    cx.ctx.uses.stdout = true;
+    const e = a[0].e;
+    if (e.t === 'n') cx.emit(A.lshow('stdout', e.v !== 0));
+    else cx.emit(A.iff(A.eq(e, 0), [A.lshow('stdout', false)], [A.lshow('stdout', true)]));
+    return [];
+  } },
   wait: { sig: 'f64->', fn: (cx, a) => { cx.emit(A.stmt('control_wait', { DURATION: a[0].e })); return []; } },
   mouse_x: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.reporter('sensing_mousex') }] },
   mouse_y: { sig: '->f64', fn: () => [{ ty: 'f64', e: A.reporter('sensing_mousey') }] },
@@ -148,6 +159,19 @@ const SCRATCH = {
   } },
   gc_roots_copy: { sig: 'i32,i32,i32->i32', fn: (cx, a) => {
     cx.emit(A.call(cx.ctx.rt.use('gcroots_copy'), a[0].e, a[1].e, a[2].e));
+    return [{ ty: 'i32', e: cx.setTmp(v('r')) }];
+  } },
+  // The program's source text kept in an editable Scratch list (one line
+  // per item): script_lines() is the number of lines, script_line(i, buf, cap)
+  // copies line i (0-based) into memory and returns its length.
+  script_lines: { sig: '->i32', fn: (cx) => {
+    cx.ctx.uses.scriptList = true;
+    return [{ ty: 'i32', e: A.listLen(SCRIPT_LIST) }];
+  } },
+  script_line: { sig: 'i32,i32,i32->i32', fn: (cx, a) => {
+    cx.ctx.uses.scriptList = true;
+    cx.ctx.uses.stdin = true; // needs the character-code costumes
+    cx.emit(A.call(cx.ctx.rt.use('strcopy'), A.item(SCRIPT_LIST, A.add(a[0].e, 1)), a[1].e, a[2].e));
     return [{ ty: 'i32', e: cx.setTmp(v('r')) }];
   } },
   random_int: { sig: 'i32,i32->i32', fn: (cx, a) => [{ ty: 'i32', e: A.mod(A.random(signed32(a[0].e), signed32(a[1].e)), U) }] },

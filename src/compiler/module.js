@@ -6,7 +6,7 @@ import { buildProject } from '../scratch/sb3.js';
 import { analyzeCallGraph, sigKey } from './analysis.js';
 import { FuncCompiler, restoreStmts } from './function.js';
 import { Runtime, TABLES, LIST_LIMIT } from './runtime.js';
-import { Imports, keyTable } from './imports.js';
+import { Imports, keyTable, SCRIPT_LIST } from './imports.js';
 
 const { v, num } = A;
 const U = 4294967296;
@@ -22,7 +22,7 @@ class Context {
     this.mod = mod;
     this.opts = opts;
     this.warnings = [];
-    this.uses = { stdout: false, stdin: false, pen: false, keys: false, say: false, gcroots: false };
+    this.uses = { stdout: false, stdin: false, pen: false, keys: false, say: false, gcroots: false, scriptList: false };
     // Must be known before any function is compiled (see FuncCompiler.paramIsArg).
     this.uses.gcroots = mod.imports.some((im) => im.kind === 'func' && im.name === 'gc_roots_begin');
     this.cg = analyzeCallGraph(mod);
@@ -128,6 +128,25 @@ class Context {
     return name;
   }
 }
+
+// Tables that minified projects compute at the green flag instead of storing.
+const GEN_SIZE = { and8: 65536, fpow2: 2124 };
+const GENERATED = {
+  // and8[a*256+b+1] = a & b, from the row for (a>>1, b>>1).
+  and8: () => {
+    const a = 'tb.a', b = 'tb.b';
+    return [A.lclear('and8'), A.set(a, 0), A.repeat(256, [A.set(b, 0), A.repeat(256, [
+      A.ladd('and8', A.add(A.mul(A.item('and8', A.add(A.add(A.mul(A.floor(A.div(v(a), 2)), 256), A.floor(A.div(v(b), 2))), 1)), 2),
+        A.mul(A.mod(v(a), 2), A.mod(v(b), 2)))),
+      A.change(b, 1)]), A.change(a, 1)])];
+  },
+  // fpow2[k + 1101] = 2^k for k in [-1100, 1023].
+  fpow2: () => {
+    const x = 'tb.x';
+    return [A.lclear('fpow2'), A.set(x, 1), A.repeat(1023, [A.set(x, A.mul(v(x), 2))]),
+      A.repeat(2124, [A.lins('fpow2', 1, v(x)), A.set(x, A.div(v(x), 2))])];
+  },
+};
 
 function findEntries(mod) {
   const exp = new Map(mod.exports.filter((e) => e.kind === 'func').map((e) => [e.name, e.index]));
@@ -252,12 +271,25 @@ export function compileWasm(bytes, opts = {}) {
     }
     const dv = new DataView(bytesArr.buffer);
     const image = new Array(words);
-    for (let i = 0; i < words; i++) {
-      const w = dv.getUint32(i * 4, true);
-      image[i] = w;
-      if (w !== 0) memdata.push(i + 1, w);
+    for (let i = 0; i < words; i++) image[i] = dv.getUint32(i * 4, true);
+    if (opts.minify) {
+      // Runs of non-zero words: start index, count, words... (short zero gaps
+      // are kept inside a run; a new run costs two numbers).
+      for (let i = 0; i < words;) {
+        if (image[i] === 0) { i++; continue; }
+        let j = i, z = 0;
+        while (j < words && z <= 3) { z = image[j] === 0 ? z + 1 : 0; j++; }
+        const end = j - z;
+        memdata.push(i + 1, end - i, ...image.slice(i, end));
+        i = end;
+      }
+      // Memory is built at the green flag when it fits under the list limit;
+      // otherwise the full image has to be stored (lists load past the limit).
+      lists.set('mem', words <= LIST_LIMIT ? [] : image);
+    } else {
+      for (let i = 0; i < words; i++) if (image[i] !== 0) memdata.push(i + 1, image[i]);
+      lists.set('mem', image);
     }
-    lists.set('mem', image);
     lists.set('memdata', memdata);
     if (words > LIST_LIMIT) ctx.warn(`initial memory (${words} words) exceeds Scratch's ${LIST_LIMIT}-item list limit; memory.grow will fail`);
   }
@@ -267,9 +299,29 @@ export function compileWasm(bytes, opts = {}) {
   const init = [
     A.set('br', 0), A.set('exn', 0), A.lclear('cs'), A.set('exit code', 0),
     A.lclear('stdout'), A.set('line', A.str('')),
+    // Start hidden with no speech bubble (a previous run may have shown it).
+    A.stmt('looks_say', { MESSAGE: A.str('') }), A.stmt('looks_hide'),
     A.set('stdin', A.str('')), A.set('stdin.pos', 1),
   ];
-  if (mod.memories.length) {
+  if (mod.memories.length && opts.minify) {
+    const k = 'init.k', n = 'init.n';
+    const fill = words <= LIST_LIMIT
+      ? [A.lclear('mem'), A.repeat(words, [A.ladd('mem', 0)])]
+      : [A.set(i, 1), A.repeat(words, [A.lrep('mem', v(i), 0), A.change(i, 1)])];
+    init.push(
+      A.iff(A.or(A.eq(v('booted'), 1), A.lt(A.listLen('mem'), words)), [
+        ...fill,
+        A.set(i, 1),
+        A.until(A.gt(v(i), A.listLen('memdata')), [
+          A.set(k, A.item('memdata', v(i))), A.set(n, A.item('memdata', A.add(v(i), 1))), A.change(i, 2),
+          A.repeat(v(n), [A.lrep('mem', v(k), A.item('memdata', v(i))), A.change(k, 1), A.change(i, 1)]),
+        ]),
+      ]),
+      A.set('booted', 1),
+      A.set('memsize', ctx.pages),
+    );
+    vars.set('booted', 0);
+  } else if (mod.memories.length) {
     init.push(
       A.iff(A.eq(v('booted'), 1), [
         A.repeat(A.sub(A.listLen('mem'), words), [A.ldel('mem', 'last')]),
@@ -314,7 +366,9 @@ export function compileWasm(bytes, opts = {}) {
 
   if (ctx.gcRoots) {
     // Every variable that may hold a wasm value, plus the saved call frames.
-    const names = [...varsUsed(allProcs)].filter((n) => !n.startsWith('prof.') && !['line', 'stdin', 'exit code'].includes(n)).sort();
+    // opts.gcRoots (a RegExp) narrows the roots to matching variable names.
+    const names = [...varsUsed(allProcs)].filter((n) => !n.startsWith('prof.') && !['line', 'stdin', 'exit code'].includes(n))
+      .filter((n) => !opts.gcRoots || opts.gcRoots.test(n)).sort();
     const k = 'gc.i';
     ctx.gcRoots.body = [
       A.lclear('gcroots'),
@@ -325,14 +379,23 @@ export function compileWasm(bytes, opts = {}) {
   }
 
   // Lookup tables and other lists.
+  const genTables = [];
   for (const name of listsUsed(allProcs, scripts)) {
     if (lists.has(name)) continue;
-    if (TABLES[name]) lists.set(name, TABLES[name]());
+    if (opts.minify && GENERATED[name]) { lists.set(name, []); genTables.push(A.iff(A.lt(A.listLen(name), GEN_SIZE[name]), GENERATED[name]())); }
+    else if (TABLES[name]) lists.set(name, TABLES[name]());
     else if (name === 'keys') lists.set(name, keyTable());
   }
+  // Built once per green flag (cheap next to the JSON they would take).
+  if (genTables.length) procs[0].body.unshift(...genTables);
 
   const monitors = [];
-  if (ctx.uses.stdout || ctx.rt.used.has('trap')) {
+  if (ctx.uses.scriptList) {
+    // Editable source on the left, output on the right.
+    if (!lists.has(SCRIPT_LIST)) lists.set(SCRIPT_LIST, opts.scriptLines || []);
+    monitors.push({ list: SCRIPT_LIST, x: 0, y: 0, width: 260, height: 360, visible: true });
+    monitors.push({ list: 'stdout', x: 262, y: 0, width: 218, height: 360, visible: true });
+  } else if (ctx.uses.stdout || ctx.rt.used.has('trap')) {
     monitors.push(ctx.uses.pen
       ? { list: 'stdout', x: 0, y: 260, width: 480, height: 100, visible: true }
       : { list: 'stdout', x: 0, y: 0, width: 480, height: 360, visible: true });
@@ -345,11 +408,13 @@ export function compileWasm(bytes, opts = {}) {
 
   const project = buildProject({
     procs: allProcs, scripts, vars, lists, monitors, costumes, extensions,
+    minify: !!opts.minify, keepNames: ['stdout', SCRIPT_LIST, 'exit code', 'line', ...(opts.keepNames || [])],
     spriteName: opts.spriteName || 'WASM',
-    // Hidden unless the program uses speech bubbles; a hidden sprite also makes
-    // "ask and wait" show its question above the input box.
-    visible: ctx.uses.say,
+    // Hidden at start: "ask and wait" then shows its question above the input
+    // box. Speech-bubble imports show the sprite when first used.
+    visible: false,
     frontSprite: 'Click the green flag',
+    frontThreshold: opts.frontSprite === true ? 0 : opts.frontSprite === false ? Infinity : undefined,
   });
   return {
     ...project,

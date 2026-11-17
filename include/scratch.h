@@ -39,9 +39,16 @@ __attribute__((import_module("scratch"), import_name("clock")))
 double wall_clock(void);   /* wall-clock seconds, always moving (unlike timer) */
 SCRATCH_IMPORT(reset_timer) void reset_timer(void);
 
+/* Show (1) or hide (0) the stdout list on stage. */
+SCRATCH_IMPORT(stdout_visible) void stdout_visible(int show);
+
 /* Control */
 SCRATCH_IMPORT(wait)       void wait(double seconds);
 SCRATCH_IMPORT(random_int) int random_int(int lo, int hi); /* inclusive */
+
+/* Program text from the editable "Python code" list (one line per item). */
+SCRATCH_IMPORT(script_lines) int script_lines(void);
+SCRATCH_IMPORT(script_line)  int script_line(int index, char *buf, int cap); /* returns length */
 
 /* Garbage-collector support (see python/main.c): every Scratch variable that
  * may hold a wasm value, as u32 words, for conservative root scanning. */

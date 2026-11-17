@@ -43,12 +43,34 @@ const BIN_OPS = {
 export class BlockWriter {
   // vars / lists: Map from name -> id. Unknown names are registered on demand
   // through the `declareVar` / `declareList` callbacks.
-  constructor({ varId, listId }) {
+  // minify: variable/list display names become their ids (except `keep`),
+  // procedures and arguments get short names, obscured shadows are dropped.
+  constructor({ varId, listId, minify = false, keep = new Set() }) {
     this.blocks = {};
     this.newId = makeIdGen();
     this.varId = varId;
     this.listId = listId;
     this.blockCount = 0;
+    this.minify = minify;
+    this.keep = keep;
+    this.procNames = new Map();
+    this.procIdGen = makeIdGen();
+    this.argMap = null;
+  }
+
+  vr(name) { const id = this.varId(name); return [this.minify && !this.keep.has(name) ? id : name, id]; }
+  lr(name) { const id = this.listId(name); return [this.minify && !this.keep.has(name) ? id : name, id]; }
+  proccode(name, nargs) {
+    if (!this.minify) return procCode(name, nargs);
+    let n = this.procNames.get(name);
+    if (!n) { n = this.procIdGen(); this.procNames.set(name, n); }
+    return procCode(n, nargs);
+  }
+  argName(name) { return this.argMap && this.argMap.has(name) ? this.argMap.get(name) : name; }
+  // An input holding a reporter: with its (hidden) default value, unless minifying.
+  covered(x, litType) {
+    if (this.minify) return [2, x];
+    return [3, x, [litType, litType === 9 ? '#000000' : '']];
   }
 
   put(id, opcode, parent, extra) {
@@ -67,8 +89,8 @@ export class BlockWriter {
     switch (e.t) {
       case 'n': return [1, [litType, fmtNum(e.v)]];
       case 's': return [1, [10, e.v]];
-      case 'v': return [3, [12, e.name, this.varId(e.name)], [litType, litType === 9 ? '#000000' : '']];
-      default: return [3, this.expr(e, parent), [litType, litType === 9 ? '#000000' : '']];
+      case 'v': return this.covered([12, ...this.vr(e.name)], litType);
+      default: return this.covered(this.expr(e, parent), litType);
     }
   }
 
@@ -82,7 +104,7 @@ export class BlockWriter {
     const id = this.newId();
     switch (e.t) {
       case 'a':
-        this.put(id, 'argument_reporter_string_number', parent, { fields: { VALUE: [e.name, null] } });
+        this.put(id, 'argument_reporter_string_number', parent, { fields: { VALUE: [this.argName(e.name), null] } });
         break;
       case 'o': {
         const op = e.op;
@@ -109,13 +131,13 @@ export class BlockWriter {
         this.put(id, 'operator_mathop', parent, { inputs: { NUM: this.input(e.a, id) }, fields: { OPERATOR: [e.fn, null] } });
         break;
       case 'i':
-        this.put(id, 'data_itemoflist', parent, { inputs: { INDEX: this.input(e.a, id, 7) }, fields: { LIST: [e.list, this.listId(e.list)] } });
+        this.put(id, 'data_itemoflist', parent, { inputs: { INDEX: this.input(e.a, id, 7) }, fields: { LIST: this.lr(e.list) } });
         break;
       case 'll':
-        this.put(id, 'data_lengthoflist', parent, { fields: { LIST: [e.list, this.listId(e.list)] } });
+        this.put(id, 'data_lengthoflist', parent, { fields: { LIST: this.lr(e.list) } });
         break;
       case 'in':
-        this.put(id, 'data_itemnumoflist', parent, { inputs: { ITEM: this.input(e.a, id, 10) }, fields: { LIST: [e.list, this.listId(e.list)] } });
+        this.put(id, 'data_itemnumoflist', parent, { inputs: { ITEM: this.input(e.a, id, 10) }, fields: { LIST: this.lr(e.list) } });
         break;
       case 'blk': {
         const b = this.put(id, e.opcode, parent, {});
@@ -144,7 +166,7 @@ export class BlockWriter {
         const mid = this.newId();
         this.put(mid, x.menu, id, { fields: { [x.field]: [literal ? String(e.v) : x.value, null] }, shadow: true });
         if (!e || literal) inputs[k] = [1, mid];
-        else if (e.t === 'v') inputs[k] = [3, [12, e.name, this.varId(e.name)], mid];
+        else if (e.t === 'v') inputs[k] = [3, [12, ...this.vr(e.name)], mid];
         else inputs[k] = [3, this.expr(e, id), mid];
       } else if (x.shadow) {
         inputs[k] = this.input(x.expr, id, x.shadow);
@@ -160,8 +182,8 @@ export class BlockWriter {
     for (const k in node.fields) {
       any = true;
       const f = node.fields[k];
-      if (f && typeof f === 'object' && f.list) fields[k] = [f.list, this.listId(f.list)];
-      else if (f && typeof f === 'object' && f.var) fields[k] = [f.var, this.varId(f.var)];
+      if (f && typeof f === 'object' && f.list) fields[k] = this.lr(f.list);
+      else if (f && typeof f === 'object' && f.var) fields[k] = this.vr(f.var);
       else fields[k] = [f, null];
     }
     if (any) b.fields = fields;
@@ -203,30 +225,33 @@ export class BlockWriter {
   stmt(s, id, parent) {
     switch (s.s) {
       case 'set':
-        this.put(id, 'data_setvariableto', parent, { inputs: { VALUE: this.input(s.v, id, 10) }, fields: { VARIABLE: [s.name, this.varId(s.name)] } });
+        this.put(id, 'data_setvariableto', parent, { inputs: { VALUE: this.input(s.v, id, 10) }, fields: { VARIABLE: this.vr(s.name) } });
         break;
       case 'change':
-        this.put(id, 'data_changevariableby', parent, { inputs: { VALUE: this.input(s.v, id) }, fields: { VARIABLE: [s.name, this.varId(s.name)] } });
+        this.put(id, 'data_changevariableby', parent, { inputs: { VALUE: this.input(s.v, id) }, fields: { VARIABLE: this.vr(s.name) } });
         break;
       case 'ladd':
-        this.put(id, 'data_addtolist', parent, { inputs: { ITEM: this.input(s.v, id, 10) }, fields: { LIST: [s.list, this.listId(s.list)] } });
+        this.put(id, 'data_addtolist', parent, { inputs: { ITEM: this.input(s.v, id, 10) }, fields: { LIST: this.lr(s.list) } });
         break;
       case 'ldel':
-        this.put(id, 'data_deleteoflist', parent, { inputs: { INDEX: this.input(s.i, id, 7) }, fields: { LIST: [s.list, this.listId(s.list)] } });
+        this.put(id, 'data_deleteoflist', parent, { inputs: { INDEX: this.input(s.i, id, 7) }, fields: { LIST: this.lr(s.list) } });
         break;
       case 'lclear':
-        this.put(id, 'data_deletealloflist', parent, { fields: { LIST: [s.list, this.listId(s.list)] } });
+        this.put(id, 'data_deletealloflist', parent, { fields: { LIST: this.lr(s.list) } });
+        break;
+      case 'lshow':
+        this.put(id, s.show ? 'data_showlist' : 'data_hidelist', parent, { fields: { LIST: this.lr(s.list) } });
         break;
       case 'lrep':
         this.put(id, 'data_replaceitemoflist', parent, {
           inputs: { INDEX: this.input(s.i, id, 7), ITEM: this.input(s.v, id, 10) },
-          fields: { LIST: [s.list, this.listId(s.list)] },
+          fields: { LIST: this.lr(s.list) },
         });
         break;
       case 'lins':
         this.put(id, 'data_insertatlist', parent, {
           inputs: { ITEM: this.input(s.v, id, 10), INDEX: this.input(s.i, id, 7) },
-          fields: { LIST: [s.list, this.listId(s.list)] },
+          fields: { LIST: this.lr(s.list) },
         });
         break;
       case 'if': {
@@ -273,10 +298,10 @@ export class BlockWriter {
         b.inputs = inputs;
         b.mutation = {
           tagName: 'mutation', children: [],
-          proccode: procCode(s.proc, s.args.length),
+          proccode: this.proccode(s.proc, s.args.length),
           argumentids: JSON.stringify(ids),
-          warp: 'true',
         };
+        if (!this.minify) b.mutation.warp = 'true';
         break;
       }
       case 'stop':
@@ -311,7 +336,9 @@ export class BlockWriter {
     const def = this.put(defId, 'procedures_definition', null, { inputs: { custom_block: [1, protoId] }, topLevel: true, x, y });
     const inputs = {};
     const ids = [];
-    proc.args.forEach((name, i) => {
+    this.argMap = this.minify ? new Map(proc.args.map((n, i) => [n, ID_CHARS[i % 52] + (i >= 52 ? i : '')])) : null;
+    const argNames = proc.args.map((n) => this.argName(n));
+    argNames.forEach((name, i) => {
       const aid = 'a' + i;
       const rid = this.newId();
       ids.push(aid);
@@ -322,14 +349,15 @@ export class BlockWriter {
       inputs, shadow: true,
       mutation: {
         tagName: 'mutation', children: [],
-        proccode: procCode(proc.name, proc.args.length),
+        proccode: this.proccode(proc.name, proc.args.length),
         argumentids: JSON.stringify(ids),
-        argumentnames: JSON.stringify(proc.args),
+        argumentnames: JSON.stringify(argNames),
         argumentdefaults: JSON.stringify(proc.args.map(() => '')),
         warp: proc.warp === false ? 'false' : 'true',
       },
     });
     def.next = this.stmts(proc.body, defId);
+    this.argMap = null;
   }
 
   // script: {hat: opcode, body}

@@ -171,18 +171,47 @@ static int run_source(const char *src, mp_parse_input_kind_t kind, qstr name) {
     return report((mp_obj_t)nlr.ret_val);
 }
 
+// Python's recursion limit, as bytes of C stack (the stack is 64 KB).
+#ifndef PY_STACK_LIMIT
+#define PY_STACK_LIMIT (40 * 1024)
+#endif
+
 static void start_python(void *stack_top) {
     mp_stack_set_top(stack_top);
+    mp_stack_set_limit(PY_STACK_LIMIT);
     gc_init(heap, heap + sizeof heap);
     mp_init();
     scratch_module_init();
 }
 
-#ifdef SCRATCH_SCRIPT
+#if defined(SCRATCH_SCRIPT) || defined(SCRATCH_LIST_SCRIPT)
 
-// ---- script mode: run a bundled .py file, then its on_frame callback ------------
+// ---- script modes: run a program, then its on_frame callback ---------------------
 
-#include "script.h" // script_name, script_src
+#ifdef SCRATCH_LIST_SCRIPT
+
+// The program is whatever the "Python code" list holds when the green flag is
+// clicked, one line per item; traceback line numbers are item numbers.
+__attribute__((export_name("start"))) void start(void) {
+    int top;
+    start_python(&top);
+    vstr_t src;
+    vstr_init(&src, 512);
+    static char line[1024];
+    int n = script_lines();
+    for (int i = 0; i < n; i++) {
+        int len = script_line(i, line, sizeof line);
+        vstr_add_strn(&src, line, (size_t)len);
+        vstr_add_char(&src, '\n');
+    }
+    run_source(vstr_null_terminated_str(&src), MP_PARSE_FILE_INPUT, qstr_from_str("Python code"));
+    vstr_clear(&src);
+    out_flush();
+}
+
+#else
+
+#include "script.h" // script_name, script_src: a bundled .py file
 
 __attribute__((export_name("start"))) void start(void) {
     int top;
@@ -190,6 +219,8 @@ __attribute__((export_name("start"))) void start(void) {
     run_source(script_src, MP_PARSE_FILE_INPUT, qstr_from_str(script_name));
     out_flush();
 }
+
+#endif
 
 // Called once per Scratch frame, with a screen refresh in between.
 __attribute__((export_name("frame"))) void frame(void) {

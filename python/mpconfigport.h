@@ -21,7 +21,6 @@
 #define MICROPY_KBD_EXCEPTION                   (0)
 #define MICROPY_PY_MICROPYTHON                  (1)
 #define MICROPY_NLR_SETJMP                      (1)
-#define MICROPY_STACK_CHECK                     (0)
 #define MICROPY_ENABLE_SOURCE_LINE              (1)
 #define MICROPY_USE_INTERNAL_PRINTF             (0)
 #define MICROPY_HW_BOARD_NAME                   "Scratch"
@@ -36,3 +35,9 @@
 
 // Lets main.c see how much was allocated since the last collection.
 #define MICROPY_GC_ALLOC_THRESHOLD              (1)
+
+// Deep recursion raises RecursionError instead of overrunning the C stack
+// (and, under the wasm interpreter, its control stacks). The limit is set
+// in main.c.
+#define MICROPY_STACK_CHECK                     (1)
+#define MICROPY_PY_MICROPYTHON_STACK_USE        (1)
